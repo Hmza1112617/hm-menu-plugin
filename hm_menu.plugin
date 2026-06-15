@@ -1,0 +1,265 @@
+import os, json, urllib.request, threading, time
+from typing import Any, Dict, List
+from base_plugin import BasePlugin, HookResult, HookStrategy
+from ui.alert import AlertDialogBuilder
+from client_utils import send_text, get_last_fragment
+from android_utils import run_on_ui_thread
+from android.widget import EditText, LinearLayout
+from android.view import Gravity
+from android.text import InputType
+from org.telegram.messenger import AndroidUtilities
+
+__id__ = "hm_menu"
+__name__ = "حماية مايكي"
+__description__ = "امر : \n .hm"
+__author__ = "@DRR_R2"
+__version__ = "1.0"
+__icon__ = "formybotshelper/24"
+__app_version__ = ">=12.5.1"
+__sdk_version__ = ">=1.4.3.3"
+
+JSON_URL = "https://raw.githubusercontent.com/Hmza1112617/mik/refs/heads/main/%D9%85.json"
+ROLES = ["مالك اساسي", "مالك", "منشئ", "مدير", "ادمن", "مميز"]
+
+
+def _plugin_dir() -> str:
+    try:
+        return os.path.dirname(os.path.abspath(__file__))
+    except Exception:
+        return "/storage/emulated/0/Download/AyuGram"
+
+
+def _fetch_data() -> tuple:
+    try:
+        resp = urllib.request.urlopen(JSON_URL, timeout=8)
+        data = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        path = os.path.join(_plugin_dir(), "mikey_commands.json")
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    lock = data.get("قفل", {})
+    toggle = data.get("تفعيل", {})
+    all_lock: List[str] = []
+    for cmds in lock.values():
+        all_lock.extend(cmds)
+    all_toggle: List[str] = []
+    for cmds in toggle.values():
+        all_toggle.extend(cmds)
+    return lock, toggle, all_lock, all_toggle
+
+
+class HMPlugin(BasePlugin):
+    def on_plugin_load(self):
+        self._delay = 0.4
+        self.add_on_send_message_hook()
+
+    def on_send_message_hook(self, account: int, params: Any) -> HookResult:
+        raw = params.message.strip() if isinstance(getattr(params, "message", None), str) else None
+        if raw is None:
+            return HookResult()
+        if not (raw == ".hm" or raw.startswith(".hm ")):
+            return HookResult()
+        peer = getattr(params, "peer", None)
+        if peer is None:
+            peer = getattr(params, "dialog_id", None)
+        if peer:
+            run_on_ui_thread(lambda: self._show_dialog(account, peer))
+        return HookResult(strategy=HookStrategy.CANCEL)
+
+    def _show_dialog(self, account: int, peer: int):
+        fragment = get_last_fragment()
+        if not fragment:
+            return
+        activity = fragment.getParentActivity()
+        if not activity:
+            return
+        self._main_menu(activity, account, peer)
+
+    def _main_menu(self, activity, account: int, peer: int):
+        self._lock, self._toggle, self._all_lock, self._all_toggle = _fetch_data()
+        b = AlertDialogBuilder(activity)
+        b.set_title(".hm")
+        b.set_items(
+            ["حمايه كلش", "قفل", "فتح", "شغل", "طفي",
+             "فتح + طفي كلش", "قفل الكل مالك اساسي", "قفل امر + رتبه", "اعدادات"],
+            lambda d, w: self._on_main(d, w, activity, account, peer),
+        )
+        b.set_negative_button("لا", lambda d, w: d.dismiss())
+        b.show()
+
+    def _on_main(self, dlg, which: int, activity, account: int, peer: int):
+        dlg.dismiss()
+        if which == 0:
+            self._do_lock_everything(peer)
+        elif which == 1:
+            self._cmd_list(activity, account, peer, "قفل", self._all_lock)
+        elif which == 2:
+            self._cmd_list(activity, account, peer, "فتح", self._all_lock)
+        elif which == 3:
+            self._cmd_list(activity, account, peer, "تفعيل", self._all_toggle)
+        elif which == 4:
+            self._cmd_list(activity, account, peer, "تعطيل", self._all_toggle)
+        elif which == 5:
+            self._do_open_disable_all(peer)
+        elif which == 6:
+            self._do_lock_all_owner(peer)
+        elif which == 7:
+            self._custom_cmd_input(activity, account, peer)
+        elif which == 8:
+            self._settings_menu(activity, account, peer)
+
+    def _send_batch(self, peer: int, texts: List[str]):
+        def _run():
+            for t in texts:
+                send_text(peer, t)
+                time.sleep(self._delay)
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _cmd_list(self, activity, account: int, peer: int, action: str, cmds: List[str]):
+        b = AlertDialogBuilder(activity)
+        b.set_title(f"{action}")
+        b.set_items(
+            cmds,
+            lambda d, w: (
+                d.dismiss(),
+                send_text(peer, f"{action} {cmds[w]}"),
+            ),
+        )
+        b.set_negative_button("رجع", lambda d, w: (
+            d.dismiss(), self._main_menu(activity, account, peer)
+        ))
+        b.show()
+
+    def _do_lock_everything(self, peer: int):
+        texts: List[str] = []
+        for c in self._all_lock:
+            texts.append(f"قفل {c}")
+        for c in self._all_toggle:
+            texts.append(f"تعطيل {c}")
+        for c in self._all_lock:
+            texts.append(f"قفل امر {c}")
+            texts.append("مالك اساسي")
+        for c in self._all_toggle:
+            texts.append(f"قفل امر {c}")
+            texts.append("مالك اساسي")
+        self._send_batch(peer, texts)
+
+    def _do_open_disable_all(self, peer: int):
+        texts: List[str] = []
+        for c in self._all_lock:
+            texts.append(f"فتح {c}")
+        for c in self._all_toggle:
+            texts.append(f"تعطيل {c}")
+        self._send_batch(peer, texts)
+
+    def _do_lock_all_owner(self, peer: int):
+        texts: List[str] = []
+        for c in self._all_lock:
+            texts.append(f"قفل امر {c}")
+            texts.append("مالك اساسي")
+        for c in self._all_toggle:
+            texts.append(f"قفل امر {c}")
+            texts.append("مالك اساسي")
+        self._send_batch(peer, texts)
+
+    def _settings_menu(self, activity, account: int, peer: int):
+        b = AlertDialogBuilder(activity)
+        b.set_title(f"سرعه: {self._delay} ث")
+        b.set_items(
+            ["غير السرعه"],
+            lambda d, w: (
+                d.dismiss(),
+                self._speed_input(activity, account, peer),
+            ),
+        )
+        b.set_negative_button("رجع", lambda d, w: (
+            d.dismiss(), self._main_menu(activity, account, peer)
+        ))
+        b.show()
+
+    def _speed_input(self, activity, account: int, peer: int):
+        edit = EditText(activity)
+        edit.setHint(str(self._delay))
+        edit.setGravity(Gravity.CENTER)
+        edit.setTextSize(18)
+        edit.setSingleLine(True)
+        edit.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_NUMBER_FLAG_DECIMAL)
+
+        layout = LinearLayout(activity)
+        layout.setOrientation(LinearLayout.VERTICAL)
+        layout.setGravity(Gravity.CENTER)
+        layout.setPadding(
+            AndroidUtilities.dp(24), AndroidUtilities.dp(16),
+            AndroidUtilities.dp(24), AndroidUtilities.dp(8),
+        )
+        layout.addView(edit)
+
+        b = AlertDialogBuilder(activity)
+        b.set_title("سرعه بالثواني")
+        b.set_view(layout, AndroidUtilities.dp(60))
+        b.set_positive_button("خلص", lambda bld, bw: (
+            bld.dismiss(),
+            self._set_speed(activity, account, peer, edit.getText().toString().strip()),
+        ))
+        b.set_negative_button("رجع", lambda bld, bw: (
+            bld.dismiss(), self._settings_menu(activity, account, peer)
+        ))
+        b.show()
+
+    def _set_speed(self, activity, account: int, peer: int, val: str):
+        try:
+            d = float(val)
+            if d >= 0:
+                self._delay = d
+        except Exception:
+            pass
+        self._settings_menu(activity, account, peer)
+
+    def _custom_cmd_input(self, activity, account: int, peer: int):
+        edit = EditText(activity)
+        edit.setHint("اسم الامر")
+        edit.setGravity(Gravity.CENTER)
+        edit.setTextSize(18)
+        edit.setSingleLine(True)
+        edit.setInputType(InputType.TYPE_CLASS_TEXT)
+
+        layout = LinearLayout(activity)
+        layout.setOrientation(LinearLayout.VERTICAL)
+        layout.setGravity(Gravity.CENTER)
+        layout.setPadding(
+            AndroidUtilities.dp(24), AndroidUtilities.dp(16),
+            AndroidUtilities.dp(24), AndroidUtilities.dp(8),
+        )
+        layout.addView(edit)
+
+        b = AlertDialogBuilder(activity)
+        b.set_title("امر مخصص")
+        b.set_view(layout, AndroidUtilities.dp(60))
+        b.set_positive_button("يلا", lambda bld, bw: (
+            bld.dismiss(),
+            self._on_custom_done(activity, account, peer, edit.getText().toString().strip()),
+        ))
+        b.set_negative_button("رجع", lambda bld, bw: (
+            bld.dismiss(), self._main_menu(activity, account, peer)
+        ))
+        b.show()
+
+    def _on_custom_done(self, activity, account: int, peer: int, cmd: str):
+        if not cmd:
+            self._custom_cmd_input(activity, account, peer)
+            return
+        self._role_menu(account, peer, cmd)
+
+    def _role_menu(self, account: int, peer: int, cmd_name: str):
+        b = AlertDialogBuilder(get_last_fragment().getParentActivity())
+        b.set_title(f"شنو الرتبه للامر ↤︎ {cmd_name}")
+        b.set_items(
+            ROLES,
+            lambda d, w: (
+                d.dismiss(),
+                send_text(peer, f"قفل امر {cmd_name}"),
+                send_text(peer, ROLES[w]),
+            ),
+        )
+        b.set_negative_button("رجع", lambda d, w: d.dismiss())
+        b.show()
